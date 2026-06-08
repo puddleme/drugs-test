@@ -1,0 +1,311 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Meds</title>
+<style>
+  :root {
+    --bg: #0f1115;
+    --panel: #171a21;
+    --panel-2: #1d212b;
+    --line: #272c38;
+    --text: #e7eaf0;
+    --muted: #8a91a3;
+    --ready: #4ade80;
+    --ready-dim: #1f3a2a;
+    --wait: #f0a850;
+    --wait-dim: #3a2e1a;
+    --maxed: #f06a6a;
+    --maxed-dim: #3a1f1f;
+    --accent: #6ea8fe;
+    --mono: ui-monospace, "SF Mono", "Roboto Mono", Menlo, monospace;
+    --sans: system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { background: var(--bg); color: var(--text); font-family: var(--sans); }
+  body { max-width: 640px; margin: 0 auto; padding: 28px 16px 80px; -webkit-tap-highlight-color: transparent; }
+
+  header { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 22px; }
+  h1 { font-size: 22px; font-weight: 650; letter-spacing: -0.01em; }
+  .sync { font-size: 12px; color: var(--muted); font-family: var(--mono); }
+  .sync.err { color: var(--maxed); }
+
+  .card {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 14px;
+    padding: 16px 16px 14px; margin-bottom: 12px; position: relative; overflow: hidden;
+  }
+  .card .toprow { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+  .name { font-size: 17px; font-weight: 600; }
+  .doses { font-size: 12px; font-family: var(--mono); color: var(--muted); white-space: nowrap; }
+  .doses b { color: var(--text); font-weight: 600; }
+
+  .status { margin-top: 12px; display: flex; align-items: center; gap: 12px; }
+  .countdown {
+    font-family: var(--mono); font-size: 30px; font-weight: 600; letter-spacing: -0.02em;
+    font-variant-numeric: tabular-nums; line-height: 1;
+  }
+  .label { font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); }
+  .when { font-size: 12px; color: var(--muted); margin-top: 3px; font-family: var(--mono); }
+
+  .card[data-state="ready"] .countdown { color: var(--ready); }
+  .card[data-state="wait"]  .countdown { color: var(--wait); }
+  .card[data-state="maxed"] .countdown { color: var(--maxed); font-size: 18px; }
+
+  .bar { height: 4px; background: var(--panel-2); border-radius: 99px; margin-top: 14px; overflow: hidden; }
+  .bar > i { display: block; height: 100%; border-radius: 99px; transition: width 1s linear; }
+  .card[data-state="ready"] .bar > i { background: var(--ready); }
+  .card[data-state="wait"]  .bar > i { background: var(--wait); }
+  .card[data-state="maxed"] .bar > i { background: var(--maxed); }
+
+  .actions { margin-top: 14px; display: flex; gap: 8px; }
+  button.take {
+    flex: 1; border: 1px solid var(--line); background: var(--panel-2); color: var(--text);
+    font-family: var(--sans); font-size: 14px; font-weight: 600; padding: 11px; border-radius: 10px;
+    cursor: pointer; transition: background .12s, border-color .12s, transform .06s;
+  }
+  button.take:hover { border-color: var(--accent); }
+  button.take:active { transform: scale(0.985); }
+  button.take:disabled { opacity: .45; cursor: not-allowed; }
+  .card[data-state="ready"] button.take { background: var(--ready-dim); border-color: #2c5840; }
+
+  .pending { position: absolute; top: 12px; right: 14px; font-size: 11px; font-family: var(--mono); color: var(--accent); display: none; }
+  .card.is-pending .pending { display: block; }
+
+  .empty { color: var(--muted); text-align: center; padding: 40px 0; font-size: 14px; }
+
+  footer { margin-top: 24px; text-align: center; }
+  footer button {
+    background: none; border: 1px solid var(--line); color: var(--muted); font-family: var(--mono);
+    font-size: 12px; padding: 8px 14px; border-radius: 8px; cursor: pointer;
+  }
+  footer button:active { color: var(--text); }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Meds</h1>
+  <span class="sync" id="sync">connecting…</span>
+</header>
+
+<div id="list"></div>
+<div class="empty" id="empty" style="display:none">No doses logged in the last 24h.</div>
+
+<footer><button id="refresh">refresh now</button></footer>
+
+<script>
+/* ============================================================
+   CONFIG — edit these three things and you're done.
+   ============================================================ */
+
+// 1. Your meds. interval = hours between doses. maxPerDay = doses per rolling 24h.
+const MEDS = [
+  { name: "Paracetamol", intervalHours: 6, maxPerDay: 4 },
+  { name: "Ibuprofen",   intervalHours: 8, maxPerDay: 3 },
+];
+
+// 2. Public Google Calendar read endpoint config.
+const CALENDAR_ID = "8b6b27ea7f4d7713a1bc170012cf6e6ef5090bca539e1be5b0c0f8c09a5339fe@group.calendar.google.com";
+const API_KEY     = "AIzaSyDayq3a3fzMkjzCd2WgiE-NOgjFiLc0Jlc";
+
+// 3. Make.com webhook that creates the calendar event.
+const WEBHOOK_URL  = "https://hook.eu2.make.com/ngwl9yig6qvf38qpuqsgikfjjm98ykmf";
+const WEBHOOK_SECRET = "change-me"; // validated by a Filter in your Make scenario
+
+const POLL_MS = 30000; // how often to re-read the calendar
+
+/* ============================================================
+   No config below this line.
+   ============================================================ */
+
+const listEl = document.getElementById("list");
+const emptyEl = document.getElementById("empty");
+const syncEl = document.getElementById("sync");
+
+// events: { medName: [Date, Date, ...] }  (most recent first)
+let events = {};
+// optimistic local marks not yet confirmed by the calendar: { medName: Date }
+let pending = {};
+let lastSync = null;
+
+function fmtClock(ms) {
+  const t = Math.max(0, Math.floor(ms / 1000));
+  const h = Math.floor(t / 3600);
+  const m = Math.floor((t % 3600) / 60);
+  const s = t % 60;
+  return `${String(h).padStart(2,"0")}:${String(m).padStart(2,"0")}:${String(s).padStart(2,"0")}`;
+}
+function fmtTime(d) {
+  return d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+}
+function dosesLast24h(times) {
+  const cutoff = Date.now() - 24 * 3600 * 1000;
+  return times.filter(d => d.getTime() >= cutoff).length;
+}
+
+/* ---- Render ---- */
+function buildCards() {
+  listEl.innerHTML = "";
+  MEDS.forEach(med => {
+    const card = document.createElement("div");
+    card.className = "card";
+    card.dataset.med = med.name;
+    card.innerHTML = `
+      <span class="pending">syncing…</span>
+      <div class="toprow">
+        <span class="name">${med.name}</span>
+        <span class="doses" data-doses></span>
+      </div>
+      <div class="status">
+        <div>
+          <div class="countdown" data-countdown>--:--:--</div>
+          <div class="when" data-when></div>
+        </div>
+        <div class="label" data-statelabel></div>
+      </div>
+      <div class="bar"><i data-bar style="width:0%"></i></div>
+      <div class="actions">
+        <button class="take" data-take>Mark taken</button>
+      </div>`;
+    card.querySelector("[data-take]").addEventListener("click", () => markTaken(med.name));
+    listEl.appendChild(card);
+  });
+}
+
+function tick() {
+  let anyShown = false;
+  MEDS.forEach(med => {
+    const card = listEl.querySelector(`.card[data-med="${CSS.escape(med.name)}"]`);
+    if (!card) return;
+
+    const confirmed = events[med.name] || [];
+    const pend = pending[med.name];
+    // Merge optimistic mark in.
+    let times = confirmed.slice();
+    if (pend) {
+      const seen = confirmed.some(d => Math.abs(d - pend) < 90000);
+      if (!seen) times = [pend, ...times];
+      else delete pending[med.name];
+    }
+    times.sort((a, b) => b - a);
+
+    card.classList.toggle("is-pending", !!pending[med.name]);
+
+    const taken24 = dosesLast24h(times);
+    const cdEl = card.querySelector("[data-countdown]");
+    const whenEl = card.querySelector("[data-when]");
+    const lblEl = card.querySelector("[data-statelabel]");
+    const barEl = card.querySelector("[data-bar]");
+    const dosesEl = card.querySelector("[data-doses]");
+    const btn = card.querySelector("[data-take]");
+
+    dosesEl.innerHTML = `<b>${taken24}</b> / ${med.maxPerDay} today`;
+
+    if (times.length) anyShown = true;
+
+    const last = times[0];
+    const intervalMs = med.intervalHours * 3600 * 1000;
+    const nextAllowed = last ? new Date(last.getTime() + intervalMs) : null;
+    const waiting = nextAllowed && nextAllowed > new Date();
+    const maxed = taken24 >= med.maxPerDay;
+
+    if (maxed && !waiting) {
+      // daily cap reached but interval elapsed — earliest is when oldest dose ages out
+      card.dataset.state = "maxed";
+      cdEl.textContent = "Daily limit reached";
+      whenEl.textContent = last ? `last ${fmtTime(last)}` : "";
+      lblEl.textContent = "Hold";
+      barEl.style.width = "100%";
+      btn.disabled = true;
+    } else if (waiting) {
+      card.dataset.state = "maxed".length && maxed ? "maxed" : "wait";
+      const remaining = nextAllowed - new Date();
+      cdEl.textContent = fmtClock(remaining);
+      whenEl.textContent = `next ${fmtTime(nextAllowed)} · last ${fmtTime(last)}`;
+      lblEl.textContent = maxed ? "Wait + limit" : "Until next";
+      const pct = 100 * (1 - remaining / intervalMs);
+      barEl.style.width = `${Math.min(100, Math.max(0, pct))}%`;
+      btn.disabled = true;
+    } else {
+      card.dataset.state = "ready";
+      cdEl.textContent = "Ready";
+      whenEl.textContent = last ? `last ${fmtTime(last)}` : "no doses yet";
+      lblEl.textContent = "Take now";
+      barEl.style.width = "100%";
+      btn.disabled = false;
+    }
+  });
+  emptyEl.style.display = anyShown ? "none" : "block";
+}
+
+/* ---- Read from Google Calendar ---- */
+async function poll() {
+  const timeMin = new Date(Date.now() - 26 * 3600 * 1000).toISOString();
+  const url = `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(CALENDAR_ID)}/events`
+    + `?key=${API_KEY}&timeMin=${encodeURIComponent(timeMin)}`
+    + `&singleEvents=true&orderBy=startTime&maxResults=250`;
+  try {
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    const grouped = {};
+    (data.items || []).forEach(ev => {
+      const name = (ev.summary || "").trim();
+      const startStr = ev.start && (ev.start.dateTime || ev.start.date);
+      if (!name || !startStr) return;
+      (grouped[name] ||= []).push(new Date(startStr));
+    });
+    Object.values(grouped).forEach(arr => arr.sort((a, b) => b - a));
+    events = grouped;
+    lastSync = new Date();
+    syncEl.textContent = `synced ${fmtTime(lastSync)}`;
+    syncEl.classList.remove("err");
+  } catch (e) {
+    syncEl.textContent = "calendar unreachable";
+    syncEl.classList.add("err");
+    console.error(e);
+  }
+  tick();
+}
+
+/* ---- Write via Make.com webhook ---- */
+async function markTaken(name) {
+  const now = new Date();
+  pending[name] = now;          // optimistic — show immediately
+  tick();
+
+  const payload = {
+    secret: WEBHOOK_SECRET,
+    med: name,
+    takenAt: now.toISOString(),
+    intervalHours: (MEDS.find(m => m.name === name) || {}).intervalHours,
+  };
+  try {
+    await fetch(WEBHOOK_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    // Re-poll after a beat so the real event replaces the optimistic one.
+    setTimeout(poll, 4000);
+    setTimeout(poll, 12000);
+  } catch (e) {
+    console.error("webhook failed", e);
+    delete pending[name];       // roll back optimistic mark
+    syncEl.textContent = "couldn't log dose — try again";
+    syncEl.classList.add("err");
+    tick();
+  }
+}
+
+/* ---- Boot ---- */
+document.getElementById("refresh").addEventListener("click", poll);
+buildCards();
+tick();
+poll();
+setInterval(poll, POLL_MS);
+setInterval(tick, 1000);
+</script>
+</body>
+</html>
