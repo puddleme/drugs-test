@@ -46,7 +46,7 @@
     font-variant-numeric: tabular-nums; line-height: 1;
   }
   .label { font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); }
-  .when { font-size: 12px; color: var(--muted); margin-top: 3px; font-family: var(--mono); }
+  .when { font-size: 15px; color: var(--muted); margin-top: 4px; font-family: var(--mono); }
 
   .card[data-state="ready"] .countdown { color: var(--ready); }
   .card[data-state="wait"]  .countdown { color: var(--wait); }
@@ -68,6 +68,36 @@
   button.take:active { transform: scale(0.985); }
   button.take:disabled { opacity: .45; cursor: not-allowed; }
   .card[data-state="ready"] button.take { background: var(--ready-dim); border-color: #2c5840; }
+
+  button.early {
+    flex: 0 0 auto; border: 1px solid var(--line); background: transparent; color: var(--wait);
+    font-family: var(--sans); font-size: 14px; font-weight: 600; padding: 11px 14px; border-radius: 10px;
+    cursor: pointer; transition: border-color .12s, transform .06s; display: none;
+  }
+  button.early:hover { border-color: var(--wait); }
+  button.early:active { transform: scale(0.985); }
+  /* Only offer early-take while waiting and not over the daily cap. */
+  .card[data-state="wait"] button.early { display: block; }
+
+  /* Modal */
+  .scrim {
+    position: fixed; inset: 0; background: rgba(6,8,12,.72); backdrop-filter: blur(2px);
+    display: none; align-items: center; justify-content: center; padding: 20px; z-index: 50;
+  }
+  .scrim.open { display: flex; }
+  .modal {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 16px;
+    padding: 22px 20px 18px; max-width: 380px; width: 100%;
+  }
+  .modal h2 { font-size: 18px; font-weight: 650; margin-bottom: 8px; }
+  .modal p { font-size: 14px; color: var(--muted); line-height: 1.5; }
+  .modal p .em { color: var(--wait); font-weight: 600; }
+  .modal .remaining { font-family: var(--mono); color: var(--text); }
+  .modal-actions { display: flex; gap: 8px; margin-top: 20px; }
+  .modal-actions button { flex: 1; font-family: var(--sans); font-size: 14px; font-weight: 600; padding: 11px; border-radius: 10px; cursor: pointer; }
+  .modal-actions .cancel { background: var(--panel-2); border: 1px solid var(--line); color: var(--text); }
+  .modal-actions .confirm { background: var(--wait-dim); border: 1px solid var(--wait); color: var(--wait); }
+  .modal-actions button:active { transform: scale(0.985); }
 
   .pending { position: absolute; top: 12px; right: 14px; font-size: 11px; font-family: var(--mono); color: var(--accent); display: none; }
   .card.is-pending .pending { display: block; }
@@ -94,6 +124,17 @@
 
 <footer><button id="refresh">refresh now</button></footer>
 
+<div class="scrim" id="scrim">
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+    <h2 id="modalTitle">Take early?</h2>
+    <p id="modalBody"></p>
+    <div class="modal-actions">
+      <button class="cancel" id="modalCancel">Cancel</button>
+      <button class="confirm" id="modalConfirm">Take now</button>
+    </div>
+  </div>
+</div>
+
 <script>
 /* ============================================================
    CONFIG — edit these three things and you're done.
@@ -101,8 +142,9 @@
 
 // 1. Your meds. interval = hours between doses. maxPerDay = doses per rolling 24h.
 const MEDS = [
-  { name: "Paracetamol", intervalHours: 6, maxPerDay: 4 },
-  { name: "Ibuprofen",   intervalHours: 8, maxPerDay: 3 },
+  { name: "Celecoxib",     intervalHours: 12, maxPerDay: 2 },
+  { name: "Paracetamol",   intervalHours: 6,  maxPerDay: 4 },
+  { name: "Morphine 5ml",  intervalHours: 6,  maxPerDay: 4 },
 ];
 
 // 2. Public Google Calendar read endpoint config.
@@ -162,13 +204,14 @@ function buildCards() {
           <div class="countdown" data-countdown>--:--:--</div>
           <div class="when" data-when></div>
         </div>
-        <div class="label" data-statelabel></div>
       </div>
       <div class="bar"><i data-bar style="width:0%"></i></div>
       <div class="actions">
         <button class="take" data-take>Mark taken</button>
+        <button class="early" data-early>Take early</button>
       </div>`;
     card.querySelector("[data-take]").addEventListener("click", () => markTaken(med.name));
+    card.querySelector("[data-early]").addEventListener("click", () => openEarlyModal(med.name));
     listEl.appendChild(card);
   });
 }
@@ -195,10 +238,10 @@ function tick() {
     const taken24 = dosesLast24h(times);
     const cdEl = card.querySelector("[data-countdown]");
     const whenEl = card.querySelector("[data-when]");
-    const lblEl = card.querySelector("[data-statelabel]");
     const barEl = card.querySelector("[data-bar]");
     const dosesEl = card.querySelector("[data-doses]");
     const btn = card.querySelector("[data-take]");
+    const earlyBtn = card.querySelector("[data-early]");
 
     dosesEl.innerHTML = `<b>${taken24}</b> / ${med.maxPerDay} today`;
 
@@ -215,25 +258,26 @@ function tick() {
       card.dataset.state = "maxed";
       cdEl.textContent = "Daily limit reached";
       whenEl.textContent = last ? `last ${fmtTime(last)}` : "";
-      lblEl.textContent = "Hold";
       barEl.style.width = "100%";
       btn.disabled = true;
+      earlyBtn.style.display = "none";
     } else if (waiting) {
-      card.dataset.state = "maxed".length && maxed ? "maxed" : "wait";
+      // At the daily cap, don't offer an early-take override at all.
+      card.dataset.state = maxed ? "maxed" : "wait";
       const remaining = nextAllowed - new Date();
       cdEl.textContent = fmtClock(remaining);
       whenEl.textContent = `next ${fmtTime(nextAllowed)} · last ${fmtTime(last)}`;
-      lblEl.textContent = maxed ? "Wait + limit" : "Until next";
       const pct = 100 * (1 - remaining / intervalMs);
       barEl.style.width = `${Math.min(100, Math.max(0, pct))}%`;
       btn.disabled = true;
+      earlyBtn.style.display = maxed ? "none" : "block";
     } else {
       card.dataset.state = "ready";
       cdEl.textContent = "Ready";
       whenEl.textContent = last ? `last ${fmtTime(last)}` : "no doses yet";
-      lblEl.textContent = "Take now";
       barEl.style.width = "100%";
       btn.disabled = false;
+      earlyBtn.style.display = "none";
     }
   });
   emptyEl.style.display = anyShown ? "none" : "block";
@@ -298,6 +342,41 @@ async function markTaken(name) {
     tick();
   }
 }
+
+/* ---- Early-take confirmation modal ---- */
+const scrim = document.getElementById("scrim");
+const modalBody = document.getElementById("modalBody");
+let earlyTarget = null;
+
+function openEarlyModal(name) {
+  const med = MEDS.find(m => m.name === name);
+  const times = (events[name] || []).slice().sort((a, b) => b - a);
+  const last = times[0];
+  let remainTxt = "";
+  if (last) {
+    const nextAllowed = new Date(last.getTime() + med.intervalHours * 3600 * 1000);
+    const remaining = nextAllowed - new Date();
+    if (remaining > 0) remainTxt = fmtClock(remaining);
+  }
+  earlyTarget = name;
+  modalBody.innerHTML =
+    `Your next <b>${name}</b> dose isn't due for ` +
+    `<span class="remaining">${remainTxt || "—"}</span>. ` +
+    `Taking it <span class="em">early</span> means a shorter gap than the ` +
+    `${med.intervalHours}-hour interval. Only do this if it matches your prescriber's instructions.`;
+  scrim.classList.add("open");
+}
+function closeEarlyModal() {
+  scrim.classList.remove("open");
+  earlyTarget = null;
+}
+document.getElementById("modalCancel").addEventListener("click", closeEarlyModal);
+document.getElementById("modalConfirm").addEventListener("click", () => {
+  if (earlyTarget) markTaken(earlyTarget);
+  closeEarlyModal();
+});
+scrim.addEventListener("click", e => { if (e.target === scrim) closeEarlyModal(); });
+document.addEventListener("keydown", e => { if (e.key === "Escape") closeEarlyModal(); });
 
 /* ---- Boot ---- */
 document.getElementById("refresh").addEventListener("click", poll);
