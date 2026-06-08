@@ -140,7 +140,7 @@
    CONFIG — edit these three things and you're done.
    ============================================================ */
 
-// 1. Your meds. interval = hours between doses. maxPerDay = doses per rolling 24h.
+// 1. Your meds. interval = hours between doses. maxPerDay = doses per calendar day (resets at midnight).
 const MEDS = [
   { name: "Celecoxib",     intervalHours: 12, maxPerDay: 2 },
   { name: "Paracetamol",   intervalHours: 6,  maxPerDay: 4 },
@@ -181,9 +181,11 @@ function fmtClock(ms) {
 function fmtTime(d) {
   return d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
 }
-function dosesLast24h(times) {
-  const cutoff = Date.now() - 24 * 3600 * 1000;
-  return times.filter(d => d.getTime() >= cutoff).length;
+function dosesToday(times) {
+  // Count doses since local midnight, so the tally resets at the start of each day.
+  const start = new Date();
+  start.setHours(0, 0, 0, 0);
+  return times.filter(d => d.getTime() >= start.getTime()).length;
 }
 
 /* ---- Render ---- */
@@ -235,7 +237,7 @@ function tick() {
 
     card.classList.toggle("is-pending", !!pending[med.name]);
 
-    const taken24 = dosesLast24h(times);
+    const takenToday = dosesToday(times);
     const cdEl = card.querySelector("[data-countdown]");
     const whenEl = card.querySelector("[data-when]");
     const barEl = card.querySelector("[data-bar]");
@@ -243,7 +245,7 @@ function tick() {
     const btn = card.querySelector("[data-take]");
     const earlyBtn = card.querySelector("[data-early]");
 
-    dosesEl.innerHTML = `<b>${taken24}</b> / ${med.maxPerDay} today`;
+    dosesEl.innerHTML = `<b>${takenToday}</b> / ${med.maxPerDay} today`;
 
     if (times.length) anyShown = true;
 
@@ -251,7 +253,7 @@ function tick() {
     const intervalMs = med.intervalHours * 3600 * 1000;
     const nextAllowed = last ? new Date(last.getTime() + intervalMs) : null;
     const waiting = nextAllowed && nextAllowed > new Date();
-    const maxed = taken24 >= med.maxPerDay;
+    const maxed = takenToday >= med.maxPerDay;
 
     if (maxed && !waiting) {
       // daily cap reached but interval elapsed — earliest is when oldest dose ages out
