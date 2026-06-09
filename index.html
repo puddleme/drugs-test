@@ -26,10 +26,16 @@
   html, body { background: var(--bg); color: var(--text); font-family: var(--sans); }
   body { max-width: 640px; margin: 0 auto; padding: 28px 16px 80px; -webkit-tap-highlight-color: transparent; }
 
-  header { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 22px; }
+  header { display: flex; align-items: baseline; justify-content: flex-end; margin-bottom: 22px; }
   h1 { font-size: 22px; font-weight: 650; letter-spacing: -0.01em; }
-  .sync { font-size: 12px; color: var(--muted); font-family: var(--mono); }
+  .sync { font-size: 12px; color: var(--muted); font-family: var(--mono); display: inline-flex; align-items: center; gap: 7px; }
   .sync.err { color: var(--maxed); }
+  .livedot { width: 7px; height: 7px; border-radius: 99px; background: var(--ready); flex: 0 0 auto; animation: breathe 2s ease-in-out infinite; }
+  .sync.err .livedot { background: var(--maxed); animation: none; }
+  @keyframes breathe {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50% { opacity: 0.25; transform: scale(0.7); }
+  }
 
   .card {
     background: var(--panel); border: 1px solid var(--line); border-radius: 14px;
@@ -115,8 +121,7 @@
 <body>
 
 <header>
-  <h1>Meds</h1>
-  <span class="sync" id="sync">connecting…</span>
+  <span class="sync" id="sync"><span class="livedot"></span><span id="syncText">connecting…</span></span>
 </header>
 
 <div id="list"></div>
@@ -142,8 +147,10 @@
 
 // 1. Your meds. interval = hours between doses. maxPerDay = doses per calendar day (resets at midnight).
 const MEDS = [
-  { name: "Celecoxib",     intervalHours: 12, maxPerDay: 2 },
   { name: "Paracetamol",   intervalHours: 6,  maxPerDay: 4 },
+  { name: "Pregabalin",    intervalHours: 12, maxPerDay: 2 },
+  { name: "Duloxetine",    intervalHours: 24, maxPerDay: 1 },
+  { name: "Celecoxib",     intervalHours: 12, maxPerDay: 2 },
   { name: "Morphine 5ml",  intervalHours: 6,  maxPerDay: 4 },
 ];
 
@@ -164,6 +171,7 @@ const POLL_MS = 30000; // how often to re-read the calendar
 const listEl = document.getElementById("list");
 const emptyEl = document.getElementById("empty");
 const syncEl = document.getElementById("sync");
+const syncTextEl = document.getElementById("syncText");
 
 // events: { medName: [Date, Date, ...] }  (most recent first)
 let events = {};
@@ -172,11 +180,13 @@ let pending = {};
 let lastSync = null;
 
 function fmtClock(ms) {
-  const t = Math.max(0, Math.floor(ms / 1000));
-  const h = Math.floor(t / 3600);
-  const m = Math.floor((t % 3600) / 60);
-  const s = t % 60;
-  return `${String(h).padStart(2,"0")}:${String(m).padStart(2,"0")}:${String(s).padStart(2,"0")}`;
+  // Round up to the next whole minute so a countdown never shows 0m while time remains.
+  const totalMin = Math.max(0, Math.ceil(ms / 60000));
+  const h = Math.floor(totalMin / 60);
+  const m = totalMin % 60;
+  if (h && m) return `${h}h ${m}m`;
+  if (h) return `${h}h`;
+  return `${m}m`;
 }
 function fmtTime(d) {
   return d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit", hour12: true });
@@ -305,10 +315,10 @@ async function poll() {
     Object.values(grouped).forEach(arr => arr.sort((a, b) => b - a));
     events = grouped;
     lastSync = new Date();
-    syncEl.textContent = `synced ${fmtTime(lastSync)}`;
+    syncTextEl.textContent = `synced ${fmtTime(lastSync)}`;
     syncEl.classList.remove("err");
   } catch (e) {
-    syncEl.textContent = "calendar unreachable";
+    syncTextEl.textContent = "calendar unreachable";
     syncEl.classList.add("err");
     console.error(e);
   }
@@ -339,7 +349,7 @@ async function markTaken(name) {
   } catch (e) {
     console.error("webhook failed", e);
     delete pending[name];       // roll back optimistic mark
-    syncEl.textContent = "couldn't log dose — try again";
+    syncTextEl.textContent = "couldn't log dose — try again";
     syncEl.classList.add("err");
     tick();
   }
