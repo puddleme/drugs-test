@@ -210,7 +210,7 @@ function fmtAgo(ms) {
 }
 function fmtTime(d) {
   return d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit", hour12: true })
-          .replace(/\s/g, "").toUpperCase();
+          .replace(/\u202f|\u00a0/g, " ").toUpperCase();
 }
 function fmtLast(last, now) {
   // Under 24h: "12h 23m ago (7:35 AM)". Past 24h: roll over to a day label.
@@ -297,27 +297,32 @@ function tick() {
     const last = times[0];
     const intervalMs = med.intervalHours * 3600 * 1000;
     const nextAllowed = last ? new Date(last.getTime() + intervalMs) : null;
-    const waiting = nextAllowed && nextAllowed > now;
+    const intervalWaiting = nextAllowed && nextAllowed > now;
     const maxed = takenToday >= med.maxPerDay;
 
-    if (maxed && !waiting) {
-      // daily cap reached but interval elapsed — earliest is when oldest dose ages out
-      card.dataset.state = "maxed";
-      cdEl.innerHTML = "Daily limit reached";
-      whenEl.textContent = last ? fmtLast(last, now) : "";
-      barEl.style.width = "100%";
-      btn.disabled = true;
-      earlyBtn.style.display = "none";
-    } else if (waiting) {
-      // At the daily cap, don't offer an early-take override at all.
+    // When at the daily cap, the next dose can't be taken until the count resets at
+    // midnight. The true "next available" is the later of: interval end and midnight.
+    const midnight = new Date(now); midnight.setHours(24, 0, 0, 0); // start of tomorrow
+    let nextAvailable = nextAllowed;
+    if (maxed) nextAvailable = new Date(Math.max(nextAllowed ? nextAllowed.getTime() : 0, midnight.getTime()));
+    const waiting = nextAvailable && nextAvailable > now;
+
+    if (waiting) {
+      // Blocked — either inside the dose interval, at the daily cap, or both.
       card.dataset.state = maxed ? "maxed" : "wait";
-      const remaining = nextAllowed - now;
-      cdEl.innerHTML = `${fmtClockHTML(remaining)}<span class="next">(${fmtTime(nextAllowed)})</span>`;
-      whenEl.textContent = fmtLast(last, now);
-      const pct = 100 * (1 - remaining / intervalMs);
+      const remaining = nextAvailable - now;
+      const nextLabel = maxed && nextAvailable.getTime() === midnight.getTime()
+        ? "tomorrow"
+        : fmtTime(nextAvailable);
+      cdEl.innerHTML = `${fmtClockHTML(remaining)}<span class="next">(${nextLabel})</span>`;
+      whenEl.textContent = last ? fmtLast(last, now) : "";
+      // Progress bar fills across whichever wait window is active.
+      const windowMs = maxed ? (nextAvailable - last) : intervalMs;
+      const pct = 100 * (1 - remaining / windowMs);
       barEl.style.width = `${Math.min(100, Math.max(0, pct))}%`;
       btn.disabled = true;
-      earlyBtn.style.display = maxed ? "none" : "block";
+      // Offer early-take only for the inter-dose interval, never to bypass the daily cap.
+      earlyBtn.style.display = (intervalWaiting && !maxed) ? "block" : "none";
     } else {
       card.dataset.state = "ready";
       cdEl.innerHTML = "Ready";
