@@ -52,6 +52,8 @@
     font-variant-numeric: tabular-nums; line-height: 1;
   }
   .label { font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); }
+  .countdown .u { opacity: 0.5; font-weight: 500; }
+  .countdown .next { font-size: 15px; font-weight: 400; color: var(--muted); font-variant-numeric: normal; letter-spacing: 0; margin-left: 8px; }
   .when { font-size: 15px; color: var(--muted); margin-top: 4px; font-family: var(--mono); }
 
   .card[data-state="ready"] .countdown { color: var(--ready); }
@@ -188,8 +190,39 @@ function fmtClock(ms) {
   if (h) return `${h}h`;
   return `${m}m`;
 }
+function fmtClockHTML(ms) {
+  // Same as fmtClock but with paled unit letters for the big countdown.
+  const totalMin = Math.max(0, Math.ceil(ms / 60000));
+  const h = Math.floor(totalMin / 60);
+  const m = totalMin % 60;
+  if (h && m) return `${h}<span class="u">h</span> ${m}<span class="u">m</span>`;
+  if (h) return `${h}<span class="u">h</span>`;
+  return `${m}<span class="u">m</span>`;
+}
+function fmtAgo(ms) {
+  // Elapsed time, rounded DOWN to the minute (e.g. 12h 23m ago).
+  const totalMin = Math.max(0, Math.floor(ms / 60000));
+  const h = Math.floor(totalMin / 60);
+  const m = totalMin % 60;
+  if (h && m) return `${h}h ${m}m`;
+  if (h) return `${h}h`;
+  return `${m}m`;
+}
 function fmtTime(d) {
   return d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit", hour12: true });
+}
+function fmtLast(last, now) {
+  // Under 24h: "12h 23m ago (7:35 AM)". Past 24h: roll over to a day label.
+  const elapsed = now - last;
+  if (elapsed < 24 * 3600 * 1000) {
+    return `${fmtAgo(elapsed)} ago (${fmtTime(last)})`;
+  }
+  // Compare by calendar day so labels track date boundaries, not exact 24h multiples.
+  const startToday = new Date(now); startToday.setHours(0, 0, 0, 0);
+  const dayDiff = Math.round((startToday - new Date(last).setHours(0, 0, 0, 0)) / (24 * 3600 * 1000));
+  if (dayDiff === 1) return `Yesterday ${fmtTime(last)}`;
+  if (dayDiff < 7) return `${last.toLocaleDateString([], { weekday: "short" })} ${fmtTime(last)}`;
+  return `${last.toLocaleDateString([], { day: "numeric", month: "short" })} ${fmtTime(last)}`;
 }
 function dosesToday(times) {
   // Count doses since local midnight, so the tally resets at the start of each day.
@@ -230,6 +263,7 @@ function buildCards() {
 
 function tick() {
   let anyShown = false;
+  const now = new Date();
   MEDS.forEach(med => {
     const card = listEl.querySelector(`.card[data-med="${CSS.escape(med.name)}"]`);
     if (!card) return;
@@ -262,31 +296,31 @@ function tick() {
     const last = times[0];
     const intervalMs = med.intervalHours * 3600 * 1000;
     const nextAllowed = last ? new Date(last.getTime() + intervalMs) : null;
-    const waiting = nextAllowed && nextAllowed > new Date();
+    const waiting = nextAllowed && nextAllowed > now;
     const maxed = takenToday >= med.maxPerDay;
 
     if (maxed && !waiting) {
       // daily cap reached but interval elapsed — earliest is when oldest dose ages out
       card.dataset.state = "maxed";
-      cdEl.textContent = "Daily limit reached";
-      whenEl.textContent = last ? `last ${fmtTime(last)}` : "";
+      cdEl.innerHTML = "Daily limit reached";
+      whenEl.textContent = last ? fmtLast(last, now) : "";
       barEl.style.width = "100%";
       btn.disabled = true;
       earlyBtn.style.display = "none";
     } else if (waiting) {
       // At the daily cap, don't offer an early-take override at all.
       card.dataset.state = maxed ? "maxed" : "wait";
-      const remaining = nextAllowed - new Date();
-      cdEl.textContent = fmtClock(remaining);
-      whenEl.textContent = `next ${fmtTime(nextAllowed)} · last ${fmtTime(last)}`;
+      const remaining = nextAllowed - now;
+      cdEl.innerHTML = `${fmtClockHTML(remaining)}<span class="next">(${fmtTime(nextAllowed)})</span>`;
+      whenEl.textContent = fmtLast(last, now);
       const pct = 100 * (1 - remaining / intervalMs);
       barEl.style.width = `${Math.min(100, Math.max(0, pct))}%`;
       btn.disabled = true;
       earlyBtn.style.display = maxed ? "none" : "block";
     } else {
       card.dataset.state = "ready";
-      cdEl.textContent = "Ready";
-      whenEl.textContent = last ? `last ${fmtTime(last)}` : "no doses yet";
+      cdEl.innerHTML = "Ready";
+      whenEl.textContent = last ? fmtLast(last, now) : "no doses yet";
       barEl.style.width = "100%";
       btn.disabled = false;
       earlyBtn.style.display = "none";
@@ -297,7 +331,9 @@ function tick() {
 
 /* ---- Read from Google Calendar ---- */
 async function poll() {
-  const timeMin = new Date(Date.now() - 26 * 3600 * 1000).toISOString();
+  // Window must comfortably exceed the longest interval (Duloxetine 24h) so the
+  // last dose is always found, plus headroom for "yesterday/older" labels.
+  const timeMin = new Date(Date.now() - 7 * 24 * 3600 * 1000).toISOString();
   const url = `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(CALENDAR_ID)}/events`
     + `?key=${API_KEY}&timeMin=${encodeURIComponent(timeMin)}`
     + `&singleEvents=true&orderBy=startTime&maxResults=250`;
