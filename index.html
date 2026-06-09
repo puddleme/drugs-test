@@ -200,13 +200,13 @@ function fmtClockHTML(ms) {
   return `${m}<span class="u">m</span>`;
 }
 function fmtAgo(ms) {
-  // Elapsed time for the "last" line, rounded DOWN: "3h 37" (no m), or "37" if under an hour.
+  // Elapsed time for the "last" line, rounded DOWN: "3h 37m", "3h", or "9m".
   const totalMin = Math.max(0, Math.floor(ms / 60000));
   const h = Math.floor(totalMin / 60);
   const m = totalMin % 60;
-  if (h && m) return `${h}h ${String(m).padStart(2, "0")}`;
+  if (h && m) return `${h}h ${m}m`;
   if (h) return `${h}h`;
-  return `${m}`;
+  return `${m}m`;
 }
 function fmtTime(d) {
   return d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit", hour12: true })
