@@ -52,7 +52,7 @@
     font-variant-numeric: tabular-nums; line-height: 1;
   }
   .label { font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); }
-  .countdown .u { opacity: 0.5; font-weight: 500; }
+  .countdown .u { opacity: 1; font-weight: 600; }
   .countdown .next { font-size: 15px; font-weight: 400; color: var(--muted); font-variant-numeric: normal; letter-spacing: 0; margin-left: 8px; }
   .when { font-size: 15px; color: var(--muted); margin-top: 4px; font-family: var(--mono); }
 
@@ -200,16 +200,17 @@ function fmtClockHTML(ms) {
   return `${m}<span class="u">m</span>`;
 }
 function fmtAgo(ms) {
-  // Elapsed time, rounded DOWN to the minute (e.g. 12h 23m ago).
+  // Elapsed time for the "last" line, rounded DOWN: "3h 37" (no m), or "37" if under an hour.
   const totalMin = Math.max(0, Math.floor(ms / 60000));
   const h = Math.floor(totalMin / 60);
   const m = totalMin % 60;
-  if (h && m) return `${h}h ${m}m`;
+  if (h && m) return `${h}h ${String(m).padStart(2, "0")}`;
   if (h) return `${h}h`;
-  return `${m}m`;
+  return `${m}`;
 }
 function fmtTime(d) {
-  return d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit", hour12: true });
+  return d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit", hour12: true })
+          .replace(/\s/g, "").toUpperCase();
 }
 function fmtLast(last, now) {
   // Under 24h: "12h 23m ago (7:35 AM)". Past 24h: roll over to a day label.
