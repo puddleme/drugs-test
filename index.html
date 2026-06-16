@@ -133,6 +133,461 @@
 
 <div class="scrim" id="scrim">
   <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+    <h2 id="modalTitle">Take early?</h2>
+    <p id="modalBody"></p>
+    <div class="modal-actions">
+      <button class="cancel" id="modalCancel">Cancel</button>
+      <button class="confirm" id="modalConfirm">Take now</button>
+    </div>
+  </div>
+</div>
+
+<script>
+/* ============================================================
+   CONFIG — edit these three things and you're done.
+   ============================================================ */
+
+// 1. Your meds. interval = hours between doses. maxPerDay = doses per calendar day (resets at midnight).
+const MEDS = [
+  { name: "Paracetamol",   intervalHours: 6,  maxPerDay: 4 },
+  { name: "Pregabalin",    intervalHours: 12, maxPerDay: 2 },
+  { name: "Duloxetine",    intervalHours: 24, maxPerDay: 1 },
+  { name: "Celecoxib",     intervalHours: 12, maxPerDay: 2 },
+  { name: "Morphine 5ml",  intervalHours: 6,  maxPerDay: 4 },
+];
+
+// 2. Public Google Calendar read endpoint config.
+const CALENDAR_ID = "8b6b27ea7f4d7713a1bc170012cf6e6ef5090bca539e1be5b0c0f8c09a5339fe@group.calendar.google.com";
+const API_KEY     = "AIzaSyDayq3a3fzMkjzCd2WgiE-NOgjFiLc0Jlc";
+
+// 3. Make.com webhook that creates the calendar event.
+const WEBHOOK_URL  = "https://hook.eu2.make.com/ngwl9yig6qvf38qpuqsgikfjjm98ykmf";
+const WEBHOOK_SECRET = "change-me"; // validated by a Filter in your Make scenario
+
+const POLL_MS = 30000; // how often to re-read the calendar
+
+/* ============================================================
+   No config below this line.
+   ============================================================ */
+
+const listEl = document.getElementById("list");
+const emptyEl = document.getElementById("empty");
+const syncEl = document.getElementById("sync");
+const syncTextEl = document.getElementById("syncText");
+
+// events: { medName: [Date, Date, ...] }  (most recent first)
+let events = {};
+// optimistic local marks not yet confirmed by the calendar: { medName: Date }
+let pending = {};
+let lastSync = null;
+
+function fmtClock(ms) {
+  // Round up to the next whole minute so a countdown never shows 0m while time remains.
+  const totalMin = Math.max(0, Math.ceil(ms / 60000));
+  const h = Math.floor(totalMin / 60);
+  const m = totalMin % 60;
+  if (h && m) return `${h}h ${m}m`;
+  if (h) return `${h}h`;
+  return `${m}m`;
+}
+function fmtClockHTML(ms) {
+  // Same as fmtClock but with paled unit letters for the big countdown.
+  const totalMin = Math.max(0, Math.ceil(ms / 60000));
+  const h = Math.floor(totalMin / 60);
+  const m = totalMin % 60;
+  if (h && m) return `${h}<span class="u">h</span> ${m}<span class="u">m</span>`;
+  if (h) return `${h}<span class="u">h</span>`;
+  return `${m}<span class="u">m</span>`;
+}
+function fmtAgo(ms) {
+  // Elapsed time for the "last" line, rounded DOWN: "3h 37m", "3h", or "9m".
+  const totalMin = Math.max(0, Math.floor(ms / 60000));
+  const h = Math.floor(totalMin / 60);
+  const m = totalMin % 60;
+  if (h && m) return `${h}h ${m}m`;
+  if (h) return `${h}h`;
+  return `${m}m`;
+}
+function fmtTime(d) {
+  return d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit", hour12: true })
+          .replace(/\u202f|\u00a0/g, " ").toUpperCase();
+}
+function fmtLast(last, now) {
+  // Under 24h: "12h 23m ago (7:35 AM)". Past 24h: roll over to a day label.
+  const elapsed = now - last;
+  if (elapsed < 24 * 3600 * 1000) {
+    return `${fmtAgo(elapsed)} ago (${fmtTime(last)})`;
+  }
+  // Compare by calendar day so labels track date boundaries, not exact 24h multiples.
+  const startToday = new Date(now); startToday.setHours(0, 0, 0, 0);
+  const dayDiff = Math.round((startToday - new Date(last).setHours(0, 0, 0, 0)) / (24 * 3600 * 1000));
+  if (dayDiff === 1) return `Yesterday ${fmtTime(last)}`;
+  if (dayDiff < 7) return `${last.toLocaleDateString([], { weekday: "short" })} ${fmtTime(last)}`;
+  return `${last.toLocaleDateString([], { day: "numeric", month: "short" })} ${fmtTime(last)}`;
+}
+function dosesToday(times) {
+  // Count doses since local midnight, so the tally resets at the start of each day.
+  const start = new Date();
+  start.setHours(0, 0, 0, 0);
+  return times.filter(d => d.getTime() >= start.getTime()).length;
+}
+
+/* ---- Render ---- */
+function buildCards() {
+  listEl.innerHTML = "";
+  MEDS.forEach(med => {
+    const card = document.createElement("div");
+    card.className = "card";
+    card.dataset.med = med.name;
+    card.innerHTML = `
+      <span class="pending">syncing…</span>
+      <div class="toprow">
+        <span class="name">${med.name}</span>
+        <span class="doses" data-doses></span>
+      </div>
+      <div class="status">
+        <div>
+          <div class="countdown" data-countdown>--:--:--</div>
+          <div class="when" data-when></div>
+        </div>
+      </div>
+      <div class="bar"><i data-bar style="width:0%"></i></div>
+      <div class="actions">
+        <button class="take" data-take>Mark taken</button>
+        <button class="early" data-early>Take early</button>
+      </div>`;
+    card.querySelector("[data-take]").addEventListener("click", () => requestTake(med.name));
+    card.querySelector("[data-early]").addEventListener("click", () => requestTake(med.name));
+    listEl.appendChild(card);
+  });
+}
+
+function tick() {
+  let anyShown = false;
+  const now = new Date();
+  MEDS.forEach(med => {
+    const card = listEl.querySelector(`.card[data-med="${CSS.escape(med.name)}"]`);
+    if (!card) return;
+
+    const confirmed = events[med.name] || [];
+    const pend = pending[med.name];
+    // Merge optimistic mark in.
+    let times = confirmed.slice();
+    if (pend) {
+      const seen = confirmed.some(d => Math.abs(d - pend) < 90000);
+      if (!seen) times = [pend, ...times];
+      else delete pending[med.name];
+    }
+    times.sort((a, b) => b - a);
+
+    card.classList.toggle("is-pending", !!pending[med.name]);
+
+    const takenToday = dosesToday(times);
+    const cdEl = card.querySelector("[data-countdown]");
+    const whenEl = card.querySelector("[data-when]");
+    const barEl = card.querySelector("[data-bar]");
+    const dosesEl = card.querySelector("[data-doses]");
+    const btn = card.querySelector("[data-take]");
+    const earlyBtn = card.querySelector("[data-early]");
+
+    dosesEl.innerHTML = `<b>${takenToday}</b> / ${med.maxPerDay} today`;
+
+    if (times.length) anyShown = true;
+
+    const last = times[0];
+    const intervalMs = med.intervalHours * 3600 * 1000;
+    const nextAllowed = last ? new Date(last.getTime() + intervalMs) : null;
+    const intervalWaiting = nextAllowed && nextAllowed > now;
+    const maxed = takenToday >= med.maxPerDay;
+
+    // When at the daily cap, the next dose can't be taken until the count resets at
+    // midnight. The true "next available" is the later of: interval end and midnight.
+    const midnight = new Date(now); midnight.setHours(24, 0, 0, 0); // start of tomorrow
+    let nextAvailable = nextAllowed;
+    if (maxed) nextAvailable = new Date(Math.max(nextAllowed ? nextAllowed.getTime() : 0, midnight.getTime()));
+    const waiting = nextAvailable && nextAvailable > now;
+
+    if (waiting) {
+      // Blocked — either inside the dose interval, at the daily cap, or both.
+      card.dataset.state = maxed ? "maxed" : "wait";
+      const remaining = nextAvailable - now;
+      const nextLabel = maxed && nextAvailable.getTime() === midnight.getTime()
+        ? "tomorrow"
+        : fmtTime(nextAvailable);
+      cdEl.innerHTML = `${fmtClockHTML(remaining)}<span class="next">(${nextLabel})</span>`;
+      whenEl.textContent = last ? fmtLast(last, now) : "";
+      // Progress bar fills across whichever wait window is active.
+      const windowMs = maxed ? (nextAvailable - last) : intervalMs;
+      const pct = 100 * (1 - remaining / windowMs);
+      barEl.style.width = `${Math.min(100, Math.max(0, pct))}%`;
+      btn.disabled = true;
+      // Offer early-take only for the inter-dose interval, never to bypass the daily cap.
+      earlyBtn.style.display = (intervalWaiting && !maxed) ? "block" : "none";
+    } else {
+      card.dataset.state = "ready";
+      cdEl.innerHTML = "Ready";
+      whenEl.textContent = last ? fmtLast(last, now) : "no doses yet";
+      barEl.style.width = "100%";
+      btn.disabled = false;
+      earlyBtn.style.display = "none";
+    }
+  });
+  emptyEl.style.display = anyShown ? "none" : "block";
+}
+
+/* ---- Read from Google Calendar ---- */
+async function poll() {
+  // Window must comfortably exceed the longest interval (Duloxetine 24h) so the
+  // last dose is always found, plus headroom for "yesterday/older" labels.
+  const timeMin = new Date(Date.now() - 7 * 24 * 3600 * 1000).toISOString();
+  const url = `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(CALENDAR_ID)}/events`
+    + `?key=${API_KEY}&timeMin=${encodeURIComponent(timeMin)}`
+    + `&singleEvents=true&orderBy=startTime&maxResults=250`;
+  try {
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    const grouped = {};
+    (data.items || []).forEach(ev => {
+      const name = (ev.summary || "").trim();
+      const startStr = ev.start && (ev.start.dateTime || ev.start.date);
+      if (!name || !startStr) return;
+      (grouped[name] ||= []).push(new Date(startStr));
+    });
+    Object.values(grouped).forEach(arr => arr.sort((a, b) => b - a));
+    events = grouped;
+    lastSync = new Date();
+    syncTextEl.textContent = `synced ${fmtTime(lastSync)}`;
+    syncEl.classList.remove("err");
+  } catch (e) {
+    syncTextEl.textContent = "calendar unreachable";
+    syncEl.classList.add("err");
+    console.error(e);
+  }
+  tick();
+}
+
+/* ---- Write via Make.com webhook ---- */
+async function markTaken(name) {
+  const now = new Date();
+  pending[name] = now;          // optimistic — show immediately
+  tick();
+
+  const payload = {
+    secret: WEBHOOK_SECRET,
+    med: name,
+    takenAt: now.toISOString(),
+    intervalHours: (MEDS.find(m => m.name === name) || {}).intervalHours,
+  };
+  try {
+    await fetch(WEBHOOK_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    // Re-poll after a beat so the real event replaces the optimistic one.
+    setTimeout(poll, 4000);
+    setTimeout(poll, 12000);
+  } catch (e) {
+    console.error("webhook failed", e);
+    delete pending[name];       // roll back optimistic mark
+    syncTextEl.textContent = "couldn't log dose — try again";
+    syncEl.classList.add("err");
+    tick();
+  }
+}
+
+/* ---- Confirmation modal (shown when taking <50% through the interval) ---- */
+const scrim = document.getElementById("scrim");
+const modalBody = document.getElementById("modalBody");
+let pendingTarget = null;
+
+// Entry point for BOTH "Mark taken" and "Take early".
+// If less than halfway through the dose interval, confirm first; otherwise log directly.
+function requestTake(name) {
+  const med = MEDS.find(m => m.name === name);
+  const times = (events[name] || []).slice().sort((a, b) => b - a);
+  const last = times[0];
+
+  if (last) {
+    const intervalMs = med.intervalHours * 3600 * 1000;
+    const sinceLast = Date.now() - last.getTime();
+    if (sinceLast < intervalMs * 0.5) {
+      openConfirmModal(name, last, sinceLast, intervalMs);
+      return;
+    }
+  }
+  markTaken(name); // first dose, or already past the halfway point
+}
+
+function openConfirmModal(name, last, sinceLast, intervalMs) {
+  const remaining = (last.getTime() + intervalMs) - Date.now();
+  pendingTarget = name;
+  modalBody.innerHTML =
+    `You last took <b>${name}</b> <span class="em">${fmtAgo(sinceLast)} ago</span> (${fmtTime(last)}).` +
+    `<br><br>Are you sure you want to take it again now?` +
+    `<br><br>The next dose isn't due for ` +
+    `<span class="remaining">${remaining > 0 ? fmtClock(remaining) : "—"}</span>` +
+    `${remaining > 0 ? ` (${fmtTime(new Date(last.getTime() + intervalMs))})` : ""}.`;
+  scrim.classList.add("open");
+}
+function closeConfirmModal() {
+  scrim.classList.remove("open");
+  pendingTarget = null;
+}
+document.getElementById("modalCancel").addEventListener("click", closeConfirmModal);
+document.getElementById("modalConfirm").addEventListener("click", () => {
+  if (pendingTarget) markTaken(pendingTarget);
+  closeConfirmModal();
+});
+scrim.addEventListener("click", e => { if (e.target === scrim) closeConfirmModal(); });
+document.addEventListener("keydown", e => { if (e.key === "Escape") closeConfirmModal(); });
+
+/* ---- Boot ---- */
+document.getElementById("refresh").addEventListener("click", poll);
+buildCards();
+tick();
+poll();
+setInterval(poll, POLL_MS);
+setInterval(tick, 1000);
+</script>
+</body>
+</html>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Meds</title>
+<style>
+  :root {
+    --bg: #0f1115;
+    --panel: #171a21;
+    --panel-2: #1d212b;
+    --line: #272c38;
+    --text: #e7eaf0;
+    --muted: #8a91a3;
+    --ready: #4ade80;
+    --ready-dim: #1f3a2a;
+    --wait: #f0a850;
+    --wait-dim: #3a2e1a;
+    --maxed: #f06a6a;
+    --maxed-dim: #3a1f1f;
+    --accent: #6ea8fe;
+    --mono: ui-monospace, "SF Mono", "Roboto Mono", Menlo, monospace;
+    --sans: system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { background: var(--bg); color: var(--text); font-family: var(--sans); }
+  body { max-width: 640px; margin: 0 auto; padding: 28px 16px 80px; -webkit-tap-highlight-color: transparent; }
+
+  header { display: flex; align-items: baseline; justify-content: flex-end; margin-bottom: 22px; }
+  h1 { font-size: 22px; font-weight: 650; letter-spacing: -0.01em; }
+  .sync { font-size: 12px; color: var(--muted); font-family: var(--mono); display: inline-flex; align-items: center; gap: 7px; }
+  .sync.err { color: var(--maxed); }
+  .livedot { width: 7px; height: 7px; border-radius: 99px; background: var(--ready); flex: 0 0 auto; animation: breathe 2s ease-in-out infinite; }
+  .sync.err .livedot { background: var(--maxed); animation: none; }
+  @keyframes breathe {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50% { opacity: 0.25; transform: scale(0.7); }
+  }
+
+  .card {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 14px;
+    padding: 16px 16px 14px; margin-bottom: 12px; position: relative; overflow: hidden;
+  }
+  .card .toprow { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+  .name { font-size: 17px; font-weight: 600; }
+  .doses { font-size: 12px; font-family: var(--mono); color: var(--muted); white-space: nowrap; }
+  .doses b { color: var(--text); font-weight: 600; }
+
+  .status { margin-top: 12px; display: flex; align-items: center; gap: 12px; }
+  .countdown {
+    font-family: var(--mono); font-size: 30px; font-weight: 600; letter-spacing: -0.02em;
+    font-variant-numeric: tabular-nums; line-height: 1;
+  }
+  .label { font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); }
+  .countdown .u { opacity: 1; font-weight: 600; }
+  .countdown .next { font-size: 15px; font-weight: 400; color: var(--muted); font-variant-numeric: normal; letter-spacing: 0; margin-left: 8px; }
+  .when { font-size: 15px; color: var(--muted); margin-top: 4px; font-family: var(--mono); }
+
+  .card[data-state="ready"] .countdown { color: var(--ready); }
+  .card[data-state="wait"]  .countdown { color: var(--wait); }
+  .card[data-state="maxed"] .countdown { color: var(--maxed); font-size: 18px; }
+
+  .bar { height: 4px; background: var(--panel-2); border-radius: 99px; margin-top: 14px; overflow: hidden; }
+  .bar > i { display: block; height: 100%; border-radius: 99px; transition: width 1s linear; }
+  .card[data-state="ready"] .bar > i { background: var(--ready); }
+  .card[data-state="wait"]  .bar > i { background: var(--wait); }
+  .card[data-state="maxed"] .bar > i { background: var(--maxed); }
+
+  .actions { margin-top: 14px; display: flex; gap: 8px; }
+  button.take {
+    flex: 1; border: 1px solid var(--line); background: var(--panel-2); color: var(--text);
+    font-family: var(--sans); font-size: 14px; font-weight: 600; padding: 11px; border-radius: 10px;
+    cursor: pointer; transition: background .12s, border-color .12s, transform .06s;
+  }
+  button.take:hover { border-color: var(--accent); }
+  button.take:active { transform: scale(0.985); }
+  button.take:disabled { opacity: .45; cursor: not-allowed; }
+  .card[data-state="ready"] button.take { background: var(--ready-dim); border-color: #2c5840; }
+
+  button.early {
+    flex: 0 0 auto; border: 1px solid var(--line); background: transparent; color: var(--wait);
+    font-family: var(--sans); font-size: 14px; font-weight: 600; padding: 11px 14px; border-radius: 10px;
+    cursor: pointer; transition: border-color .12s, transform .06s; display: none;
+  }
+  button.early:hover { border-color: var(--wait); }
+  button.early:active { transform: scale(0.985); }
+  /* Only offer early-take while waiting and not over the daily cap. */
+  .card[data-state="wait"] button.early { display: block; }
+
+  /* Modal */
+  .scrim {
+    position: fixed; inset: 0; background: rgba(6,8,12,.72); backdrop-filter: blur(2px);
+    display: none; align-items: center; justify-content: center; padding: 20px; z-index: 50;
+  }
+  .scrim.open { display: flex; }
+  .modal {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 16px;
+    padding: 22px 20px 18px; max-width: 380px; width: 100%;
+  }
+  .modal h2 { font-size: 18px; font-weight: 650; margin-bottom: 8px; }
+  .modal p { font-size: 14px; color: var(--muted); line-height: 1.5; }
+  .modal p .em { color: var(--wait); font-weight: 600; }
+  .modal .remaining { font-family: var(--mono); color: var(--text); }
+  .modal-actions { display: flex; gap: 8px; margin-top: 20px; }
+  .modal-actions button { flex: 1; font-family: var(--sans); font-size: 14px; font-weight: 600; padding: 11px; border-radius: 10px; cursor: pointer; }
+  .modal-actions .cancel { background: var(--panel-2); border: 1px solid var(--line); color: var(--text); }
+  .modal-actions .confirm { background: var(--wait-dim); border: 1px solid var(--wait); color: var(--wait); }
+  .modal-actions button:active { transform: scale(0.985); }
+
+  .pending { position: absolute; top: 12px; right: 14px; font-size: 11px; font-family: var(--mono); color: var(--accent); display: none; }
+  .card.is-pending .pending { display: block; }
+
+  .empty { color: var(--muted); text-align: center; padding: 40px 0; font-size: 14px; }
+
+  footer { margin-top: 24px; text-align: center; }
+  footer button {
+    background: none; border: 1px solid var(--line); color: var(--muted); font-family: var(--mono);
+    font-size: 12px; padding: 8px 14px; border-radius: 8px; cursor: pointer;
+  }
+  footer button:active { color: var(--text); }
+</style>
+</head>
+<body>
+
+<header>
+  <span class="sync" id="sync"><span class="livedot"></span><span id="syncText">connecting…</span></span>
+</header>
+
+<div id="list"></div>
+<div class="empty" id="empty" style="display:none">No doses logged in the last 24h.</div>
+
+<footer><button id="refresh">refresh now</button></footer>
+
+<div class="scrim" id="scrim">
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
     <h2 id="modalTitle">Take again so soon?</h2>
     <p id="modalBody"></p>
     <div class="modal-actions">
