@@ -133,7 +133,7 @@
 
 <div class="scrim" id="scrim">
   <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
-    <h2 id="modalTitle">Take early?</h2>
+    <h2 id="modalTitle">Take again so soon?</h2>
     <p id="modalBody"></p>
     <div class="modal-actions">
       <button class="cancel" id="modalCancel">Cancel</button>
@@ -256,8 +256,8 @@ function buildCards() {
         <button class="take" data-take>Mark taken</button>
         <button class="early" data-early>Take early</button>
       </div>`;
-    card.querySelector("[data-take]").addEventListener("click", () => markTaken(med.name));
-    card.querySelector("[data-early]").addEventListener("click", () => openEarlyModal(med.name));
+    card.querySelector("[data-take]").addEventListener("click", () => requestTake(med.name));
+    card.querySelector("[data-early]").addEventListener("click", () => requestTake(med.name));
     listEl.appendChild(card);
   });
 }
@@ -397,40 +397,50 @@ async function markTaken(name) {
   }
 }
 
-/* ---- Early-take confirmation modal ---- */
+/* ---- Confirmation modal (shown when taking <50% through the interval) ---- */
 const scrim = document.getElementById("scrim");
 const modalBody = document.getElementById("modalBody");
-let earlyTarget = null;
+let pendingTarget = null;
 
-function openEarlyModal(name) {
+// Entry point for BOTH "Mark taken" and "Take early".
+// If less than halfway through the dose interval, confirm first; otherwise log directly.
+function requestTake(name) {
   const med = MEDS.find(m => m.name === name);
   const times = (events[name] || []).slice().sort((a, b) => b - a);
   const last = times[0];
-  let remainTxt = "";
+
   if (last) {
-    const nextAllowed = new Date(last.getTime() + med.intervalHours * 3600 * 1000);
-    const remaining = nextAllowed - new Date();
-    if (remaining > 0) remainTxt = fmtClock(remaining);
+    const intervalMs = med.intervalHours * 3600 * 1000;
+    const sinceLast = Date.now() - last.getTime();
+    if (sinceLast < intervalMs * 0.5) {
+      openConfirmModal(name, last, sinceLast, intervalMs);
+      return;
+    }
   }
-  earlyTarget = name;
+  markTaken(name); // first dose, or already past the halfway point
+}
+
+function openConfirmModal(name, last, sinceLast, intervalMs) {
+  const remaining = (last.getTime() + intervalMs) - Date.now();
+  pendingTarget = name;
   modalBody.innerHTML =
-    `Your next <b>${name}</b> dose isn't due for ` +
-    `<span class="remaining">${remainTxt || "—"}</span>. ` +
-    `Taking it <span class="em">early</span> means a shorter gap than the ` +
-    `${med.intervalHours}-hour interval. Only do this if it matches your prescriber's instructions.`;
+    `You last took <b>${name}</b> <span class="em">${fmtAgo(sinceLast)} ago</span> (${fmtTime(last)}).` +
+    `<br><br>Are you sure you want to take it again now?` +
+    `<br><br>The next dose isn't due for ` +
+    `<span class="remaining">${remaining > 0 ? fmtClock(remaining) : "—"}</span>.`;
   scrim.classList.add("open");
 }
-function closeEarlyModal() {
+function closeConfirmModal() {
   scrim.classList.remove("open");
-  earlyTarget = null;
+  pendingTarget = null;
 }
-document.getElementById("modalCancel").addEventListener("click", closeEarlyModal);
+document.getElementById("modalCancel").addEventListener("click", closeConfirmModal);
 document.getElementById("modalConfirm").addEventListener("click", () => {
-  if (earlyTarget) markTaken(earlyTarget);
-  closeEarlyModal();
+  if (pendingTarget) markTaken(pendingTarget);
+  closeConfirmModal();
 });
-scrim.addEventListener("click", e => { if (e.target === scrim) closeEarlyModal(); });
-document.addEventListener("keydown", e => { if (e.key === "Escape") closeEarlyModal(); });
+scrim.addEventListener("click", e => { if (e.target === scrim) closeConfirmModal(); });
+document.addEventListener("keydown", e => { if (e.key === "Escape") closeConfirmModal(); });
 
 /* ---- Boot ---- */
 document.getElementById("refresh").addEventListener("click", poll);
